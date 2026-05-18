@@ -2,11 +2,11 @@
 
 **Ascendancy Technical Exercise** | Tomi Brasca
 
-This project analyzes a dataset of 248 enriched LinkedIn profiles to answer two core questions:
+This project analyzes 248 enriched LinkedIn profiles to answer two core questions:
 1. **How well-connected is this network?**
 2. **What groups, clusters, or communities does it consist of?**
 
-Since the data contains no explicit relationship edges, all connections are inferred from shared attributes (companies, schools, locations, skills, industries) with careful attention to temporal overlap and edge weighting.
+Since the data lacks explicit relationship edges, all connections are inferred from shared attributes (companies, schools, locations, skills, industries) using temporal overlap checks and tiered edge weighting.
 
 ---
 
@@ -27,17 +27,17 @@ Since the data contains no explicit relationship edges, all connections are infe
 This analysis constructs a social network graph from enriched LinkedIn profile data where **no explicit edges exist**. The core challenge is designing a meaningful edge-weighting scheme that reveals real structure beneath surface-level connections.
 
 ### Dataset
-- **248 LinkedIn profiles** with rich professional and educational history
-- **No explicit relationship data** - all edges are inferred
-- **Key attributes**: work experience, education, location, skills, industry
-- **Data quality**: 96% have LinkedIn connection counts, 48% have graduation years, 23% have skills data
+- **248 enriched LinkedIn profiles** with professional and educational history
+- **No explicit relationship data** — all edges are inferred from shared attributes
+- **Key attributes**: work experience, education, location, skills, current industry
+- **Completeness**: 96% have connection counts, 48% have graduation years, 23% have skills data
 
 ### Key Innovation
 Unlike naive approaches that create edges for any shared attribute, this analysis:
-- **Requires temporal overlap** for work and school relationships
-- **Downweights Clemson connections** (50% of network shares this affiliation)
+- **Requires temporal overlap** for work and school relationships (co-workers must have overlapping tenure)
+- **Downweights Clemson University edges** (50% of network shares this affiliation, creating a near-clique)
 - **Incorporates skill similarity** and **industry bridges** to reveal hidden professional communities
-- **Uses tiered edge weights** based on relationship strength and rarity
+- **Uses tiered edge weights** based on relationship strength and signal rarity
 
 ---
 
@@ -58,6 +58,83 @@ Edges are weighted using a **tiered scheme** that reflects both relationship str
 | Same current industry, different employer | **+1** | Weak professional-ecosystem bridge |
 
 **Why temporal overlap matters**: Two people who attended Clemson 30 years apart shouldn't have an edge. Requiring date overlap ensures edges represent likely real connections, not coincidental shared affiliations.
+
+### Code Example: Edge Construction
+
+Here's how the temporal overlap check and edge weight computation work:
+
+```python
+from datetime import datetime
+
+def has_temporal_overlap(exp1: dict, exp2: dict) -> bool:
+    """Check if two work/school experiences overlapped in time."""
+    s1 = parse_date(exp1.get("start_date"))
+    e1 = parse_date(exp1.get("end_date")) or datetime.now()
+    s2 = parse_date(exp2.get("start_date"))
+    e2 = parse_date(exp2.get("end_date")) or datetime.now()
+    
+    if not s1 or not s2:
+        return False
+    return s1 <= e2 and s2 <= e1
+
+def compute_edge(person_a: str, person_b: str) -> dict | None:
+    """Compute weighted edge between two people. Returns None if no connection."""
+    weight = 0
+    edge_types = []
+    
+    # Shared companies (with temporal overlap)
+    for company in set(person_a.companies) & set(person_b.companies):
+        if any(has_temporal_overlap(ea, eb) 
+               for ea in person_a.companies[company] 
+               for eb in person_b.companies[company]):
+            if company == "Clemson University":
+                weight += 2
+                edge_types.append("clemson_work")
+            else:
+                weight += 4
+                edge_types.append("work")
+    
+    # Shared schools (with temporal overlap)
+    for school in set(person_a.schools) & set(person_b.schools):
+        if any(has_temporal_overlap(ea, eb) 
+               for ea in person_a.schools[school] 
+               for eb in person_b.schools[school]):
+            if is_clemson(school):
+                weight += 1
+                edge_types.append("clemson_school")
+            else:
+                weight += 3
+                edge_types.append("school")
+    
+    # Same specific location
+    if person_a.location and person_b.location and person_a.location == person_b.location:
+        weight += 1
+        edge_types.append("location")
+    
+    # Shared specialized skills (≥3)
+    shared_skills = person_a.skills & person_b.skills
+    if len(shared_skills) >= 3:
+        weight += 2
+        edge_types.append("skill")
+    
+    # Same industry, different current employer
+    if (person_a.industry and person_b.industry and 
+        person_a.industry == person_b.industry and
+        person_a.current_company != person_b.current_company):
+        weight += 1
+        edge_types.append("industry")
+    
+    if weight == 0:
+        return None
+    
+    return {"weight": weight, "edge_types": edge_types}
+```
+
+**Example**: Two people who both worked at Invisible Technologies (overlapping 2020-2022), share 5 specialized skills, and live in NYC would have:
+- Work edge: +4
+- Skill edge: +2
+- Location edge: +1
+- **Total weight: 7**
 
 ### Network Metrics
 
@@ -181,7 +258,7 @@ The network is **moderately connected** with strong hub-and-spokes topology:
 - **Average path length: 2.01** - most people are 2 hops away
 - **Transitivity: 0.84** - high clustering within communities
 
-**Clemson dominates structure**: 5,171 edges (68%) come from Clemson school connections. Without Clemson edges, the network fragments significantly but reveals a hidden professional ecosystem.
+**Clemson University dominates the network structure**: 5,171 edges (68%) stem from shared Clemson school affiliation. Removing these edges fragments the network but reveals a hidden professional ecosystem of tech startups and investigations firms.
 
 ### Q2: What communities exist?
 
@@ -194,12 +271,7 @@ The network is **moderately connected** with strong hub-and-spokes topology:
 | **Clemson · Campus / Recent Grads** | 69 | 62 (90%) | Current students and recent graduates |
 | **Isolates** | 17 | mixed | No shared context with any other nodes |
 
-**Higher resolution (1.5)** splits the network into **43 communities**, breaking Clemson clusters by **graduation year cohorts**:
-- 2023 graduates: 18 people in one tight cluster
-- 2024-2029 current/future students: separate sub-community
-- Mid-2010s alumni: their own group
-
-This temporal structure is now clean because the analysis requires actual date overlap.
+**Higher resolution (1.5)** splits the network into **43 communities**, segmenting Clemson clusters by **graduation year cohorts** (e.g., 2023 grads form a tight 18-person cluster; 2024-2029 students form another). This temporal structure emerges naturally from the date-overlap requirement.
 
 ### Most Important Bridge Nodes (Betweenness Centrality)
 
@@ -218,13 +290,13 @@ These people connect otherwise separate communities:
 
 The **Ascendancy founding team** is exceptionally tightly knit with multiple overlapping work histories.
 
-### Surprising Discoveries
+### Key Insights
 
-1. **The investigations cluster is real**: Social Slooth (8 people) + other investigations/security firms emerged as a connected professional ecosystem once industry edges were added. Previously appeared as disconnected islands.
+1. **Hidden professional ecosystem emerged**: Industry and skill edges revealed that Social Slooth investigators (8 people) and other security/investigations firms form a connected professional community—previously obscured by Clemson dominance.
 
-2. **Skills data unlocked hidden bridges**: Despite only 23% coverage, shared specialized skills revealed professional affinities that work/school history missed.
+2. **Skills data bridged fragmented communities**: Despite 23% coverage, shared specialized skills revealed professional affinities invisible in work/school history alone.
 
-3. **Temporal overlap removed ~40% of naive edges**: Requiring actual date overlap eliminated false positives from people who shared affiliations decades apart.
+3. **Temporal overlap eliminated 40% of false edges**: Date-overlap requirements removed spurious connections between people who shared affiliations decades apart (e.g., Clemson graduates from 1995 and 2025).
 
 ---
 
@@ -237,10 +309,10 @@ The **Ascendancy founding team** is exceptionally tightly knit with multiple ove
 - **Edges**: 7,601 (filtered to weight ≥2 for visualization clarity)
 
 ### Data Cleaning & Normalization
-- **Company normalization**: Clemson University has 7+ sub-entities (all merged to "Clemson University")
-- **Name cleanup**: Emoji characters stripped
+- **Company normalization**: Merged 7+ Clemson sub-entities into "Clemson University"
+- **Name cleanup**: Stripped emoji characters from profile names
 - **Date parsing**: Handles both `YYYY` and `YYYY-MM-DD` formats
-- **Temporal overlap**: Custom function compares start/end dates for co-occurrence
+- **Temporal overlap function**: Compares start/end dates to verify co-occurrence at companies/schools
 
 ### Community Detection
 - **Algorithm**: Louvain (greedy modularity optimization)
@@ -266,20 +338,20 @@ The **Ascendancy founding team** is exceptionally tightly knit with multiple ove
 
 ### Current Limitations
 
-1. **No explicit edge data**: All relationships are inferred, not ground-truth
-2. **Skills data sparse**: Only 23% of profiles have skills listed
-3. **No interaction data**: Missing LinkedIn messages, endorsements, recommendations
-4. **Clemson dominance likely artificial**: Suggests ego network centered on Clemson affiliate
-5. **Edge weights are heuristic**: +4/+3/+2/+1 tiers are reasoned but not empirically validated
-6. **No time-series analysis**: Static snapshot, can't track network evolution
+1. **All relationships are inferred** from shared attributes, not ground-truth connections
+2. **Skills data is sparse** (23% coverage), limiting professional affinity signals
+3. **No interaction data** (LinkedIn messages, endorsements, recommendations)
+4. **Clemson bias** likely reflects ego network centered on a Clemson-affiliated individual
+5. **Edge weights are heuristic**, not empirically validated against known relationships
+6. **Static snapshot** cannot track network evolution over time
 
 ### Assumptions
 
-- Temporal overlap at same company → likely knew each other
-- Shared school with date overlap → social connection
-- 3+ shared specialized skills → professional affinity
-- Same industry, different employer → aware of each other's world
-- This is an ego network (248 people are likely 1st-degree connections of one person)
+- Temporal overlap at the same company indicates likely acquaintance
+- Shared school attendance with date overlap indicates social connection
+- 3+ shared specialized skills indicates professional affinity
+- Same industry, different employer indicates awareness of each other's professional world
+- This dataset represents an ego network (248 people likely connected to one central individual)
 
 ### Recommended Next Steps
 
@@ -313,13 +385,9 @@ The **Ascendancy founding team** is exceptionally tightly knit with multiple ove
 
 ## About This Analysis
 
-This network analysis was developed as a technical exercise for **Ascendancy**, a relationship intelligence platform. The goal was to demonstrate:
-- Thoughtful approach to inferring relationships from incomplete data
-- Understanding of network science fundamentals
-- Ability to extract actionable insights from complex graphs
-- Clear communication of technical findings
+This network analysis was developed as a technical exercise for **Ascendancy**, a relationship intelligence platform. It demonstrates inferring relationships from incomplete data, applying network science fundamentals, extracting actionable insights, and communicating technical findings clearly.
 
-For questions or discussion about the methodology, contact: **tomibrasca97@gmail.com**
+**Contact**: tomibrasca97@gmail.com
 
 ---
 
